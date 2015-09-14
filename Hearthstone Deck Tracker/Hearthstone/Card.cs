@@ -4,6 +4,7 @@ using System;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
@@ -21,13 +22,13 @@ namespace Hearthstone_Deck_Tracker.Hearthstone
 		private bool _coloredFrame;
 		private int _count;
 		private int _inHandCount;
-		private bool _isStolen;
-		private bool _justDrawn;
+		private bool _isCreated;
 		private int _lastCount;
 		private bool _loaded;
 		private string _localizedName;
 		private string _name;
 		private string _text;
+		private string _englishText;
 		private bool _wasDiscarded;
 		public string Id;
 
@@ -47,7 +48,7 @@ namespace Hearthstone_Deck_Tracker.Hearthstone
 		}
 
 		public Card(string id, string playerClass, string rarity, string type, string name, int cost, string localizedName, int inHandCount,
-		            int count, string text, int attack, int health, string race, string[] mechanics, int? durability, string artist,
+		            int count, string text, string englishText, int attack, int health, string race, string[] mechanics, int? durability, string artist,
 		            string set)
 		{
 			Id = id;
@@ -60,6 +61,7 @@ namespace Hearthstone_Deck_Tracker.Hearthstone
 			InHandCount = inHandCount;
 			Count = count;
 			Text = text;
+			EnglishText = englishText;
 			Attack = attack;
 			Health = health;
 			Race = race;
@@ -80,6 +82,9 @@ namespace Hearthstone_Deck_Tracker.Hearthstone
 		}
 
 		[XmlIgnore]
+		public bool Jousted { get; set; }
+
+		[XmlIgnore]
 		public int Attack { get; set; }
 
 		[XmlIgnore]
@@ -92,13 +97,30 @@ namespace Hearthstone_Deck_Tracker.Hearthstone
 			set
 			{
 				_text = value != null
-					        ? value.Replace("<b>", "")
-					               .Replace("</b>", "")
-					               .Replace("<i>", "")
-					               .Replace("</i>", "")
-					               .Replace("$", "")
-					               .Replace("#", "")
-					               .Replace("\\n", "\n") : null;
+							? value.Replace("<b>", "")
+								   .Replace("</b>", "")
+								   .Replace("<i>", "")
+								   .Replace("</i>", "")
+								   .Replace("$", "")
+								   .Replace("#", "")
+								   .Replace("\\n", "\n") : null;
+			}
+		}
+
+		[XmlIgnore]
+		public string EnglishText
+		{
+			get { return string.IsNullOrEmpty(_englishText) ? Text : _englishText; }
+			set
+			{
+				_englishText = value != null
+							? value.Replace("<b>", "")
+								   .Replace("</b>", "")
+								   .Replace("<i>", "")
+								   .Replace("</i>", "")
+								   .Replace("$", "")
+								   .Replace("#", "")
+								   .Replace("\\n", "\n") : null;
 			}
 		}
 
@@ -147,6 +169,29 @@ namespace Hearthstone_Deck_Tracker.Hearthstone
 		[XmlIgnore]
 		public int Cost { get; set; }
 
+		private readonly Regex _overloadRegex = new Regex(@"Overload:.+?\((?<value>(\d+))\)");
+		private int? _overload;
+	    
+
+	    [XmlIgnore]
+		public int Overload
+		{
+			get
+			{
+				if(_overload.HasValue)
+					return _overload.Value;
+				var overload = -1;
+				if(!string.IsNullOrEmpty(EnglishText))
+				{
+					var match = _overloadRegex.Match(EnglishText);
+					if(match.Success)
+						int.TryParse(match.Groups["value"].Value, out overload);
+					_overload = overload;
+				}
+				return overload;
+			}
+		}
+
 		[XmlIgnore]
 		public string Artist { get; set; }
 
@@ -175,12 +220,12 @@ namespace Hearthstone_Deck_Tracker.Hearthstone
 		}
 
 		[XmlIgnore]
-		public bool IsStolen
+		public bool IsCreated
 		{
-			get { return _isStolen; }
+			get { return _isCreated; }
 			set
 			{
-				_isStolen = value;
+				_isCreated = value;
 				OnPropertyChanged();
 			}
 		}
@@ -198,22 +243,22 @@ namespace Hearthstone_Deck_Tracker.Hearthstone
 
 		public int Height
 		{
-			get { return (int)(OverlayWindow.Scaling * 35); }
+			get { return (int)Math.Round(OverlayWindow.Scaling * 35, 0); }
 		}
 
 		public int OpponentHeight
 		{
-			get { return (int)(OverlayWindow.OpponentScaling * 35); }
+			get { return (int)Math.Round(OverlayWindow.OpponentScaling * 35, 0); }
 		}
 
 		public int PlayerWindowHeight
 		{
-			get { return (int)(PlayerWindow.Scaling * 35); }
+			get { return (int)Math.Round(PlayerWindow.Scaling * 35, 0); }
 		}
 
 		public int OpponentWindowHeight
 		{
-			get { return (int)(OpponentWindow.Scaling * 35); }
+			get { return (int)Math.Round(OpponentWindow.Scaling * 35, 0); }
 		}
 
 		public string GetPlayerClass
@@ -226,13 +271,13 @@ namespace Hearthstone_Deck_Tracker.Hearthstone
 			get
 			{
 				Color color;
-				if(_justDrawn)
+				if(HighlightDraw && Config.Instance.HighlightLastDrawn)
 					color = Colors.Orange;
-				else if(InHandCount > 0 && Game.HighlightCardsInHand || IsStolen)
+				else if(IsCreated || (HighlightInHand && Config.Instance.HighlightCardsInHand))
 					color = Colors.GreenYellow;
-				else if(Count <= 0)
+				else if(Count <= 0 || Jousted)
 					color = Colors.Gray;
-				else if(WasDiscarded && Game.HighlightDiscarded)
+				else if(WasDiscarded && Config.Instance.HighlightDiscarded)
 					color = Colors.IndianRed;
 				else
 					color = Colors.White;
@@ -326,7 +371,7 @@ namespace Hearthstone_Deck_Tracker.Hearthstone
 					}
 
 					//dark overlay
-					if(Count <= 0)
+					if(Count <= 0 || Jousted)
 						drawingGroup.Children.Add(new ImageDrawing(new BitmapImage(new Uri("Images/dark.png", UriKind.Relative)), new Rect(0, 0, 218, 35)));
 
 					var brush = new ImageBrush {ImageSource = new DrawingImage(drawingGroup)};
@@ -340,9 +385,12 @@ namespace Hearthstone_Deck_Tracker.Hearthstone
 			}
 		}
 
+		public bool HighlightDraw { get; set; }
+		public bool HighlightInHand { get; set; }
+
 		public object Clone()
 		{
-			var newcard = new Card(Id, PlayerClass, Rarity, Type, Name, Cost, LocalizedName, InHandCount, Count, Text, Attack, Health, Race,
+			var newcard = new Card(Id, PlayerClass, Rarity, Type, Name, Cost, LocalizedName, InHandCount, Count, Text, EnglishText, Attack, Health, Race,
 			                       Mechanics, Durability, Artist, Set);
 			return newcard;
 		}
@@ -377,7 +425,7 @@ namespace Hearthstone_Deck_Tracker.Hearthstone
 			if(_loaded)
 				return;
 
-			var stats = Game.GetCardFromId(Id);
+			var stats = Database.GetCardFromId(Id);
 			PlayerClass = stats.PlayerClass;
 			Rarity = stats.Rarity;
 			Type = stats.Type;
@@ -386,6 +434,7 @@ namespace Hearthstone_Deck_Tracker.Hearthstone
 			LocalizedName = stats.LocalizedName;
 			InHandCount = stats.InHandCount;
 			Text = stats.Text;
+			EnglishText = stats.EnglishText;
 			Attack = stats.Attack;
 			Health = stats.Health;
 			Race = stats.Race;
@@ -393,21 +442,8 @@ namespace Hearthstone_Deck_Tracker.Hearthstone
 			Mechanics = stats.Mechanics;
 			Artist = stats.Artist;
 			Set = stats.Set;
-			_wasDiscarded = false;
 			_loaded = true;
 			OnPropertyChanged();
-		}
-
-		public async Task JustDrawn()
-		{
-			if(!Config.Instance.HighlightLastDrawn)
-				return;
-
-			_justDrawn = true;
-			OnPropertyChanged("ColorPlayer");
-			await Task.Delay(4000);
-			_justDrawn = false;
-			OnPropertyChanged("ColorPlayer");
 		}
 
 		protected virtual void OnPropertyChanged([CallerMemberName] string propertyName = null)

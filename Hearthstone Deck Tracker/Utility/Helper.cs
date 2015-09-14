@@ -7,6 +7,7 @@ using System.ComponentModel;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Runtime.Serialization.Formatters.Binary;
@@ -23,6 +24,7 @@ using Hearthstone_Deck_Tracker.FlyoutControls;
 using Hearthstone_Deck_Tracker.Hearthstone;
 using MahApps.Metro.Controls.Dialogs;
 using Microsoft.Win32;
+using Card = Hearthstone_Deck_Tracker.Hearthstone.Card;
 using Color = System.Drawing.Color;
 using PixelFormat = System.Drawing.Imaging.PixelFormat;
 using Point = System.Drawing.Point;
@@ -48,7 +50,6 @@ namespace Hearthstone_Deck_Tracker
 			{"Korean", "koKR"},
 			{"Polish", "plPL"},
 			{"Portuguese (Brazil)", "ptBR"},
-			{"Portuguese (Portugal)", "ptPT"},
 			{"Russian", "ruRU"},
 			{"Spanish (Mexico)", "esMX"},
 			{"Spanish (Spain)", "esES"}
@@ -57,6 +58,7 @@ namespace Hearthstone_Deck_Tracker
 		public static MainWindow MainWindow { get; set; }
 		public static OptionsMain OptionsMain { get; set; }
 		public static bool SettingUpConstructedImporting { get; set; }
+		public static Visibility UseButtonVisiblity {get { return Config.Instance.AutoUseDeck ? Visibility.Collapsed : Visibility.Visible; } }
 
 		public static async Task<Version> CheckForUpdates(bool beta)
 		{
@@ -92,13 +94,14 @@ namespace Hearthstone_Deck_Tracker
 			return null;
 		}
 
+		private static Version _currentVersion;
 		// A bug in the SerializableVersion.ToString() method causes this to load Version.xml incorrectly.
 		// The build and revision numbers are swapped (i.e. a Revision of 21 in Version.xml loads to Version.Build == 21).
 		public static Version GetCurrentVersion()
 		{
 			try
 			{
-				return new Version(XmlManager<SerializableVersion>.Load("Version.xml").ToString());
+				return _currentVersion ?? (_currentVersion = new Version(XmlManager<SerializableVersion>.Load("Version.xml").ToString()));
 			}
 			catch(Exception e)
 			{
@@ -220,6 +223,11 @@ namespace Hearthstone_Deck_Tracker
 			view1.SortDescriptions.Add(new SortDescription("LocalizedName", ListSortDirection.Ascending));
 		}
 
+		public static List<Card> ToSortedCardList(this IEnumerable<Card> cards)
+		{
+			return cards.OrderBy(x => x.Cost).ThenByDescending(x => x.Type).ThenBy(x => x.LocalizedName).ToArray().ToList();
+		}
+
 		public static string DeckToIdString(Deck deck)
 		{
 			return deck.GetSelectedDeckVersion().Cards.Aggregate("", (current, card) => current + (card.Id + ":" + card.Count + ";"));
@@ -295,19 +303,19 @@ namespace Hearthstone_Deck_Tracker
 			return Math.Abs(pixel.R - red) <= deviation && Math.Abs(pixel.G - green) <= deviation && Math.Abs(pixel.B - blue) <= deviation;
 		}
 
-		public static void UpdateEverything()
+		public static void UpdateEverything(GameV2 game)
 		{
 			if(MainWindow.Overlay.IsVisible)
 				MainWindow.Overlay.Update(false);
 
 			if(MainWindow.PlayerWindow.IsVisible)
-				MainWindow.PlayerWindow.SetCardCount(Game.PlayerHandCount, 30 - Game.PlayerDrawn.Sum(card => card.Count));
+				MainWindow.PlayerWindow.SetCardCount(game.Player.HandCount, game.Player.DeckCount);
 
 			if(MainWindow.OpponentWindow.IsVisible)
-				MainWindow.OpponentWindow.SetOpponentCardCount(Game.OpponentHandCount, Game.OpponentDeckCount, Game.OpponentHasCoin);
+				MainWindow.OpponentWindow.SetOpponentCardCount(game.Opponent.HandCount, game.Opponent.DeckCount, game.Opponent.HasCoin);
 
 
-			if(MainWindow.NeedToIncorrectDeckMessage && !MainWindow.IsShowingIncorrectDeckMessage && Game.CurrentGameMode != GameMode.Spectator)
+			if(MainWindow.NeedToIncorrectDeckMessage && !MainWindow.IsShowingIncorrectDeckMessage && game.CurrentGameMode != GameMode.Spectator)
 			{
 				MainWindow.IsShowingIncorrectDeckMessage = true;
 				MainWindow.ShowIncorrectDeckMessage();
@@ -394,10 +402,10 @@ namespace Hearthstone_Deck_Tracker
 			return DateTime.Now;
 		}
 
-		public static async Task SetupConstructedImporting()
+		public static async Task SetupConstructedImporting(GameV2 game)
 		{
 			var settings = new MetroDialogSettings {AffirmativeButtonText = "continue"};
-			if(!Game.IsRunning)
+			if(!game.IsRunning)
 				await MainWindow.ShowMessageAsync("Step 0:", "Start Hearthstone", settings: settings);
 			await MainWindow.ShowMessageAsync("Step 1:", "Go to the main menu", settings: settings);
 			SettingUpConstructedImporting = true;
@@ -405,7 +413,7 @@ namespace Hearthstone_Deck_Tracker
 				MainWindow.ShowMessageAsync("Step 2:",
 				                            "Open \"My Collection\" and click each class icon at the top once.\n\n- Do not click on neutral\n- Do not open any decks\n- Do not flip the pages.",
 				                            settings: new MetroDialogSettings {AffirmativeButtonText = "done"});
-			Config.Instance.ConstructedImportingIgnoreCachedIds = Game.PossibleConstructedCards.Select(c => c.Id).ToArray();
+			Config.Instance.ConstructedImportingIgnoreCachedIds = game.PossibleConstructedCards.Select(c => c.Id).ToArray();
 			Config.Save();
 			SettingUpConstructedImporting = false;
 		}
@@ -441,6 +449,39 @@ namespace Hearthstone_Deck_Tracker
 				valid = false;
 				return template;
 			}
+		}
+
+		//http://stackoverflow.com/questions/14795197/forcefully-replacing-existing-files-during-extracting-file-using-system-io-compr
+		public static void ExtractToDirectory(this ZipArchive archive, string destinationDirectoryName, bool overwrite)
+		{
+			if(!overwrite)
+			{
+				archive.ExtractToDirectory(destinationDirectoryName);
+				return;
+			}
+			foreach(var file in archive.Entries)
+			{
+				var completeFileName = Path.Combine(destinationDirectoryName, file.FullName);
+				if(file.Name == "")
+				{
+					// Assuming Empty for Directory
+					Directory.CreateDirectory(Path.GetDirectoryName(completeFileName));
+					continue;
+				}
+				file.ExtractToFile(completeFileName, true);
+			}
+		}
+
+		public static void UpdatePlayerCards()
+		{
+			MainWindow.Overlay.UpdatePlayerCards();
+			MainWindow.PlayerWindow.UpdatePlayerCards();
+		}
+
+		public static void UpdateOpponentCards()
+		{
+			MainWindow.Overlay.UpdateOpponentCards();
+			MainWindow.OpponentWindow.UpdateOpponentCards();
 		}
 	}
 }

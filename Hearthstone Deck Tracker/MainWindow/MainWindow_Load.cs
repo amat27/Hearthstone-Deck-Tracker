@@ -1,16 +1,17 @@
 ﻿#region
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Forms;
 using System.Windows.Media;
 using HDTHelper;
 using Hearthstone_Deck_Tracker.Enums;
-using Hearthstone_Deck_Tracker.Hearthstone;
 using Hearthstone_Deck_Tracker.HearthStats.API;
 using Hearthstone_Deck_Tracker.Utility;
 using Hearthstone_Deck_Tracker.Windows;
@@ -275,12 +276,35 @@ namespace Hearthstone_Deck_Tracker
 						converted = true;
 					}
 				}
+				if(configVersion <= new Version(0, 10, 10, 0)) //button moved up with new expansion added to the list
+				{
+					Config.Instance.Reset("ExportAllSetsButtonY");
+					converted = true;
+				}
+				if(configVersion <= new Version(0, 11, 1, 0))
+				{
+					if(Config.Instance.GoldProgressLastReset.Length < 5)
+					{
+						Config.Instance.GoldProgressLastReset = new[] { DateTime.MinValue, DateTime.MinValue, DateTime.MinValue, DateTime.MinValue, DateTime.MinValue};
+						converted = true;
+					}
+					if(Config.Instance.GoldProgress.Length < 5)
+					{
+						Config.Instance.Reset("GoldProgress");
+						converted = true;
+					}
+					if(Config.Instance.GoldProgressTotal.Length < 5)
+					{
+						Config.Instance.Reset("GoldProgressTotal");
+						converted = true;
+					}
+				}
 			}
 
 			if(converted)
 			{
 				Logger.WriteLine("changed config values", "ConvertLegacyConfig");
-				Config.SaveBackup();
+				//Config.SaveBackup();
 				Config.Save();
 			}
 
@@ -316,48 +340,130 @@ namespace Hearthstone_Deck_Tracker
 			return found;
 		}
 
+		public class LogConfig
+		{
+			public readonly List<ConfigItem> Configitems = new List<ConfigItem>();
+			public class ConfigItem
+			{
+				public string Name { get; set; }
+				public int LogLevel { get; set; }
+				public bool FilePrinting { get; set; }
+				public bool ConsolePrinting { get; set; }
+				public bool ScreenPrinting { get; set; }
+
+				public ConfigItem(string name)
+				{
+					Name = name;
+					ResetValues();
+				}
+
+				public void ResetValues()
+				{
+					LogLevel = 1;
+					FilePrinting = true;
+					ConsolePrinting = Config.Instance.LogConfigConsolePrinting;
+					ScreenPrinting = false;
+				}
+			}
+			public static readonly Regex NameRegex = new Regex(@"\[(?<value>(\w+))\]");
+			public static readonly Regex LogLevelRegex = new Regex(@"LogLevel=(?<value>(\d+))");
+			public static readonly Regex FilePrintingRegex = new Regex(@"FilePrinting=(?<value>(\w+))");
+			public static readonly Regex ConsolePrintingRegex = new Regex(@"ConsolePrinting=(?<value>(\w+))");
+			public static readonly Regex ScreenPrintingRegex = new Regex(@"ScreenPrinting=(?<value>(\w+))");
+		}
+
 		private bool UpdateLogConfigFile()
 		{
 			var updated = false;
 			//check for log config and create if not existing
 			try
 			{
-				var requiredLogs = new[] {"Zone", "Bob", "Power", "Asset", "Rachelle"};
+				var requiredLogs = new[] {"Zone", "Bob", "Power", "Asset", "Rachelle", "Arena", "Achievements" };
 
-				string[] actualLogs = {};
+				LogConfig logConfig = new LogConfig();
 				if(File.Exists(_logConfigPath))
 				{
 					using(var sr = new StreamReader(_logConfigPath))
 					{
-						var content = sr.ReadToEnd();
-						actualLogs =
-							content.Split(new[] {'\r', '\n'}, StringSplitOptions.RemoveEmptyEntries)
-							       .Where(x => x.StartsWith("["))
-							       .Select(x => x.Substring(1, x.Length - 2))
-							       .ToArray();
+						LogConfig.ConfigItem current = null;
+						string line;
+						while(!sr.EndOfStream && (line = sr.ReadLine()) != null)
+						{
+							var nameMatch = LogConfig.NameRegex.Match(line);
+							if(nameMatch.Success)
+							{
+								if(current != null)
+									logConfig.Configitems.Add(current);
+								current = new LogConfig.ConfigItem(nameMatch.Groups["value"].Value);
+								continue;
+							}
+							if(current == null)
+								continue;
+							var logLevelMatch = LogConfig.LogLevelRegex.Match(line);
+							if(logLevelMatch.Success)
+							{
+								current.LogLevel = int.Parse(logLevelMatch.Groups["value"].Value);
+								continue;
+							}
+
+							var filePrintingMatch = LogConfig.FilePrintingRegex.Match(line);
+							if(filePrintingMatch.Success)
+							{
+								current.FilePrinting = bool.Parse(filePrintingMatch.Groups["value"].Value);
+								continue;
+							}
+
+							var consolePrintingMatch = LogConfig.ConsolePrintingRegex.Match(line);
+							if(consolePrintingMatch.Success)
+							{
+								current.ConsolePrinting = bool.Parse(consolePrintingMatch.Groups["value"].Value);
+								continue;
+							}
+
+							var screenPrintingMatch = LogConfig.ScreenPrintingRegex.Match(line);
+							if(screenPrintingMatch.Success)
+							{
+								current.ScreenPrinting = bool.Parse(screenPrintingMatch.Groups["value"].Value);
+								continue;
+							}
+						}
+						if(current != null)
+							logConfig.Configitems.Add(current);
 					}
 				}
 
-				var missing = requiredLogs.Where(x => !actualLogs.Contains(x)).ToList();
-				if(missing.Any())
+				foreach(var requiredLog in requiredLogs)
 				{
-					using(var sw = new StreamWriter(_logConfigPath, true))
+					if(logConfig.Configitems.All(x => x.Name != requiredLog))
 					{
-						foreach(var log in missing)
-						{
-							sw.WriteLine("[{0}]", log);
-							sw.WriteLine("LogLevel=1");
-							sw.WriteLine("FilePrinting=false");
-							sw.WriteLine("ConsolePrinting=true");
-							sw.WriteLine("ScreenPrinting=false");
-							Logger.WriteLine("Added " + log + " to log.config.", "UpdateLogConfig");
-						}
+						logConfig.Configitems.Add(new LogConfig.ConfigItem(requiredLog));
+						Logger.WriteLine("Added " + requiredLog + " to log.config.", "UpdateLogConfig");
+						updated = true;
 					}
+				}
+
+				if(logConfig.Configitems.Any(x => !x.FilePrinting || x.ConsolePrinting != Config.Instance.LogConfigConsolePrinting))
+				{
+					foreach(var configItem in logConfig.Configitems)
+						configItem.ResetValues();
 					updated = true;
 				}
-				var additional = actualLogs.Where(x => !requiredLogs.Contains(x)).ToList();
-				foreach(var log in additional)
-					Logger.WriteLine("log.config contains additional log: " + log + ".", "UpdateLogConfig");
+
+				if(updated)
+				{
+					using(var sw = new StreamWriter(_logConfigPath))
+					{
+						foreach(var configItem in logConfig.Configitems)
+						{
+							sw.WriteLine("[{0}]", configItem.Name);
+							sw.WriteLine("LogLevel={0}", configItem.LogLevel);
+							sw.WriteLine("FilePrinting={0}", configItem.FilePrinting.ToString().ToLower());
+							sw.WriteLine("ConsolePrinting={0}", configItem.ConsolePrinting.ToString().ToLower());
+							sw.WriteLine("ScreenPrinting={0}", configItem.ScreenPrinting.ToString().ToLower());
+						}
+					}
+				}
+
 			}
 			catch(Exception e)
 			{
@@ -496,11 +602,9 @@ namespace Hearthstone_Deck_Tracker
 				                                                           ? new SolidColorBrush((Color)Application.Current.Resources["GrayTextColor1"])
 				                                                           : new SolidColorBrush((Color)Application.Current.Resources["GrayTextColor2"]);
 
-			Options.Load();
+			Options.Load(_game);
 
 
-			Game.HighlightCardsInHand = Config.Instance.HighlightCardsInHand;
-			Game.HighlightDiscarded = Config.Instance.HighlightDiscarded;
 			CheckboxDeckDetection.IsChecked = Config.Instance.AutoDeckDetection;
 			SetContextMenuProperty("autoSelectDeck", "Checked", (bool)CheckboxDeckDetection.IsChecked);
 
@@ -533,17 +637,17 @@ namespace Hearthstone_Deck_Tracker
 				Config.Instance.KeyPressOnGameEnd = "None";
 
 			ManaCurveMyDecks.Visibility = Config.Instance.ManaCurveMyDecks ? Visibility.Visible : Visibility.Collapsed;
-			ManaCurveMyDecks.ListViewStatType.SelectedIndex = (int)Config.Instance.ManaCurveFilter;
+			//ManaCurveMyDecks.ListViewStatType.SelectedIndex = (int)Config.Instance.ManaCurveFilter;
 
 			CheckboxClassCardsFirst.IsChecked = Config.Instance.CardSortingClassFirst;
 			SetContextMenuProperty("classCardsFirst", "Checked", (bool)CheckboxClassCardsFirst.IsChecked);
 			SetContextMenuProperty("useNoDeck", "Checked", DeckList.Instance.ActiveDeck == null);
 
 
-			DeckStatsFlyout.LoadConfig();
-			GameDetailsFlyout.LoadConfig();
-			StatsWindow.StatsControl.LoadConfig();
-			StatsWindow.GameDetailsFlyout.LoadConfig();
+			DeckStatsFlyout.LoadConfig(_game);
+			GameDetailsFlyout.LoadConfig(_game);
+			StatsWindow.StatsControl.LoadConfig(_game);
+			StatsWindow.GameDetailsFlyout.LoadConfig(_game);
 
 			MenuItemCheckBoxSyncOnStart.IsChecked = Config.Instance.HearthStatsSyncOnStart;
 			MenuItemCheckBoxAutoUploadDecks.IsChecked = Config.Instance.HearthStatsAutoUploadNewDecks;
@@ -581,7 +685,11 @@ namespace Hearthstone_Deck_Tracker
 			}
 			ManaCurveMyDecks.UpdateValues();
 			if(_updatedVersion != null)
-				await this.ShowUpdateNotesMessage();
+			{
+				FlyoutUpdateNotes.IsOpen = true;
+				UpdateNotesControl.LoadUpdateNotes();
+				//await this.ShowUpdateNotesMessage();
+			}
 
 			if(!_foundHsDirectory)
 				await this.ShowHsNotInstalledMessage();
@@ -592,12 +700,15 @@ namespace Hearthstone_Deck_Tracker
 					                 "This is either your first time starting the tracker or the log.config file has been updated. Please restart Hearthstone once, for the tracker to work properly.");
 			}
 
+			if(!Config.Instance.FixedDuplicateMatches)
+				RemoveDuplicateMatches(false);
+
 			if(!Config.Instance.ResolvedOpponentNames)
 				ResolveOpponentNames();
 			if(!Config.Instance.ResolvedDeckStatsIds)
 			{
-				if(ResolveDeckStatsIds())
-					Restart();
+				ResolveDeckStatsIds();
+					//Restart();
 			}
 			if(Config.Instance.HearthStatsSyncOnStart && HearthStatsAPI.IsLoggedIn)
 				HearthStatsManager.SyncAsync(background: true);
